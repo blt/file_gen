@@ -4,10 +4,11 @@ use governor::state::direct::{self, InsufficientCapacity};
 use governor::{clock, state, Quota, RateLimiter};
 use hyper::client::Client;
 use hyper::client::HttpConnector;
+use hyper::header::CONTENT_LENGTH;
 use hyper::{Body, Request, Uri};
 use lading_common::block::{self, chunk_bytes, construct_block_cache, Block};
 use lading_common::payload;
-use metrics::{counter, gauge, increment_gauge};
+use metrics::{counter, gauge};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
@@ -51,14 +52,14 @@ impl From<::std::io::Error> for Error {
 }
 
 const ONE_MEBIBYTE: usize = 1_000_000;
-const BLOCK_BYTE_SIZES: [usize; 12] = [
-    ONE_MEBIBYTE / 1024,
-    ONE_MEBIBYTE / 512,
-    ONE_MEBIBYTE / 256,
-    ONE_MEBIBYTE / 128,
-    ONE_MEBIBYTE / 64,
-    ONE_MEBIBYTE / 32,
-    ONE_MEBIBYTE / 16,
+const BLOCK_BYTE_SIZES: [usize; 5] = [
+    // ONE_MEBIBYTE / 1024,
+    // ONE_MEBIBYTE / 512,
+    // ONE_MEBIBYTE / 256,
+    // ONE_MEBIBYTE / 128,
+    // ONE_MEBIBYTE / 64,
+    // ONE_MEBIBYTE / 32,
+    // ONE_MEBIBYTE / 16,
     ONE_MEBIBYTE / 8,
     ONE_MEBIBYTE / 4,
     ONE_MEBIBYTE / 2,
@@ -186,23 +187,26 @@ impl Worker {
                 let request: Request<Body> = Request::builder()
                     .method(method)
                     .uri(uri)
+                    .header(CONTENT_LENGTH, block_length)
                     .body(body)
                     .unwrap();
 
                 async move {
                     rate_limiter.until_n_ready(total_bytes).await.unwrap();
-                    increment_gauge!("inflight_requests", 1.0, &labels);
-                    if let Ok(response) = client.request(request).await {
-                        counter!("bytes_written", block_length as u64, &labels);
-                        let status = response.status();
-                        let mut status_labels = labels.clone();
-                        status_labels
-                            .push(("status_code".to_string(), status.as_u16().to_string()));
-                        counter!("response", 1, &status_labels);
-                    } else {
-                        counter!("request_failure", 1, &labels);
+                    counter!("requests_sent", 1, &labels);
+                    match client.request(request).await {
+                        Ok(response) => {
+                            counter!("bytes_written", block_length as u64, &labels);
+                            let status = response.status();
+                            let mut status_labels = labels.clone();
+                            status_labels
+                                .push(("status_code".to_string(), status.as_u16().to_string()));
+                            counter!("response", 1, &status_labels);
+                        }
+                        Err(_) => {
+                            counter!("request_failure", 1, &labels);
+                        }
                     }
-                    increment_gauge!("inflight_requests", -1.0, &labels);
                 }
             })
             .await;
